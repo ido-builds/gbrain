@@ -7,7 +7,20 @@ import { operations, OperationError } from './core/operations.ts';
 import type { Operation, OperationContext } from './core/operations.ts';
 import { serializeMarkdown } from './core/markdown.ts';
 import { parseGlobalFlags, setCliOptions, getCliOptions } from './core/cli-options.ts';
+import { startCliTimer, type CliTimer } from './core/cli-timer.ts';
 import { VERSION } from './version.ts';
+
+// Long-lived commands where a spinning command timer would clobber log output.
+// The timer is skipped entirely for these.
+const TIMER_SKIP_COMMANDS = new Set(['serve', 'autopilot']);
+
+function shouldSkipTimer(command: string, subArgs: string[]): boolean {
+  if (TIMER_SKIP_COMMANDS.has(command)) return true;
+  if (command === 'jobs' && subArgs[0] === 'work') return true;
+  if (command === 'agent' && subArgs.includes('--follow')) return true;
+  if (process.env.GBRAIN_TIMER === '0') return true;
+  return false;
+}
 
 // Build CLI name -> operation lookup
 const cliOps = new Map<string, Operation>();
@@ -61,6 +74,22 @@ async function main() {
       printOpHelp(op);
       return;
     }
+  }
+
+  // Top-level command timer. Renders "⠋ 3.2s gbrain query" on stderr while the
+  // command runs, then "✓ done in 3.2s" / "✗ failed in 3.2s" on stop. Silent
+  // on non-TTY and under --quiet so pipelines stay unchanged. Skipped for
+  // long-lived daemons. The exit hook covers process.exit() paths inside
+  // command handlers we don't otherwise unwind through.
+  let timer: CliTimer | null = null;
+  if (!shouldSkipTimer(command, subArgs)) {
+    timer = startCliTimer({
+      label: `gbrain ${command}`,
+      quiet: cliOpts.quiet,
+    });
+    process.on('exit', (code) => {
+      timer?.stop(code === 0 ? 'ok' : 'fail');
+    });
   }
 
   // CLI-only commands

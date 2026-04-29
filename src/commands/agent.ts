@@ -16,8 +16,10 @@
 import * as fs from 'node:fs';
 import type { BrainEngine } from '../core/engine.ts';
 import { MinionQueue } from '../core/minions/queue.ts';
+import { MinionWorker } from '../core/minions/worker.ts';
 import { waitForCompletion, TimeoutError } from '../core/minions/wait-for-completion.ts';
 import type { MinionJobInput, SubagentHandlerData, AggregatorHandlerData } from '../core/minions/types.ts';
+import { registerBuiltinHandlers } from './jobs.ts';
 import { runAgentLogs } from './agent-logs.ts';
 
 // ── arg parsing helpers ────────────────────────────────────
@@ -274,6 +276,22 @@ async function followJob(engine: BrainEngine, queue: MinionQueue, jobId: number,
   const ac = new AbortController();
   const onSigint = () => ac.abort();
   process.once('SIGINT', onSigint);
+
+  // On PGLite there is no separate `gbrain jobs work` daemon (the embedded
+  // engine holds an exclusive file lock — a second process can't claim).
+  // Mirror the inline-worker pattern from `gbrain jobs submit --follow`
+  // so the subagent + aggregator handlers run in *this* process while we
+  // poll for completion. Postgres falls through unchanged: the user's own
+  // worker daemon (or supervisor) claims the job.
+  let inlineWorker: MinionWorker | null = null;
+  let inlineWorkerPromise: Promise<void> | null = null;
+  if (engine.kind === 'pglite') {
+    inlineWorker = new MinionWorker(engine, { queue: 'default', pollInterval: 100 });
+    await registerBuiltinHandlers(inlineWorker, engine);
+    inlineWorkerPromise = inlineWorker.start();
+    process.stderr.write(`[gbrain agent] PGLite engine: running inline worker in this process\n`);
+  }
+
   try {
     // Streaming logs happen in the background; we poll the terminal state
     // in parallel so the function returns as soon as the job completes.
@@ -297,6 +315,10 @@ async function followJob(engine: BrainEngine, queue: MinionQueue, jobId: number,
       throw e;
     }
   } finally {
+    if (inlineWorker) {
+      inlineWorker.stop();
+      await inlineWorkerPromise?.catch(() => {});
+    }
     process.removeListener('SIGINT', onSigint);
   }
 }

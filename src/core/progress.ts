@@ -466,6 +466,15 @@ export function startHeartbeat(p: ProgressReporter, note: string, intervalMs = 1
   };
 }
 
+/**
+ * True when any progress phase is currently registered with the singleton
+ * coordinator. Consumers (e.g., the CLI command timer) use this to yield the
+ * stderr line to the bulk-progress reporter so the two don't fight over `\r`.
+ */
+export function hasLiveProgressPhase(): boolean {
+  return liveReporters.size > 0;
+}
+
 // Test-only hook so we can assert one signal handler across many reporters.
 // Not part of the public API; used by test/progress.test.ts.
 export function __liveReporterCountForTest(): number {
